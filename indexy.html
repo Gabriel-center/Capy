@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, maximum-scale=1.0">
+    <title>Capybara Rescue: Sanctuary</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #87CEEB;
+            font-family: 'Segoe UI', sans-serif;
+            touch-action: none;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+        #canvas-container { width: 100vw; height: 100vh; display: block; }
+        #ui {
+            position: absolute; bottom: 30px; width: 100%; pointer-events: none;
+            display: flex; justify-content: center; gap: 20px;
+        }
+        .instruction {
+            color: rgba(255, 255, 255, 0.95); font-weight: 800;
+            text-transform: uppercase; font-size: 12px; letter-spacing: 1px;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.3);
+            background: rgba(0,0,0,0.2); padding: 8px 16px;
+            border-radius: 20px; backdrop-filter: blur(4px);
+        }
+        .zone-hint {
+            position: absolute; top: 0; height: 100%; width: 50%;
+            pointer-events: none; opacity: 0; transition: opacity 0.2s;
+        }
+        .zone-left { left: 0; background: linear-gradient(90deg, rgba(255,255,255,0.1), transparent); }
+        .zone-right { right: 0; background: linear-gradient(-90deg, rgba(255,255,255,0.1), transparent); }
+        body[data-steer="left"] .zone-left { opacity: 1; }
+        body[data-steer="right"] .zone-right { opacity: 1; }
+    </style>
+</head>
+<body>
+
+    <div id="canvas-container"></div>
+    <div class="zone-hint zone-left"></div>
+    <div class="zone-hint zone-right"></div>
+
+    <div id="ui">
+        <div class="instruction">Hold Side to Turn</div>
+        <div class="instruction">Rescue Babies</div>
+        <div class="instruction">Find Water</div>
+    </div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        // --- Config ---
+        const CONF = {
+            walkSpeed: 3.5,
+            turnSpeed: 2.0,
+            renderDistance: 55,
+            historyLength: 1000, 
+            babySpacing: 45, // Increased spacing
+            lakeRarity: 0.003
+        };
+
+        // --- Setup Scene ---
+        const container = document.getElementById('canvas-container');
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87CEEB);
+        scene.fog = new THREE.Fog(0x87CEEB, 25, CONF.renderDistance);
+
+        const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 100);
+        
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        container.appendChild(renderer.domElement);
+
+        const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.8);
+        scene.add(hemiLight);
+
+        const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
+        dirLight.position.set(15, 25, 10);
+        dirLight.castShadow = true;
+        dirLight.shadow.mapSize.set(1024, 1024);
+        const d = 30;
+        dirLight.shadow.camera.left = -d;
+        dirLight.shadow.camera.right = d;
+        dirLight.shadow.camera.top = d;
+        dirLight.shadow.camera.bottom = -d;
+        scene.add(dirLight);
+
+        // --- Materials ---
+        const mats = {
+            fur: new THREE.MeshStandardMaterial({ color: 0x967146, roughness: 1, flatShading: true }),
+            babyFur: new THREE.MeshStandardMaterial({ color: 0x7a5c3d, roughness: 1, flatShading: true }), // Darker, cuter brown
+            nose: new THREE.MeshStandardMaterial({ color: 0x1a110a }),
+            eye: new THREE.MeshStandardMaterial({ color: 0x050505 }),
+            water: new THREE.MeshStandardMaterial({ color: 0x4fa4b8, roughness: 0.05, metalness: 0.1, transparent: true, opacity: 0.8 }),
+            tear: new THREE.MeshBasicMaterial({ color: 0x00ffff }),
+            heart: new THREE.MeshBasicMaterial({ color: 0xff69b4 })
+        };
+
+        // --- Capybara Builder ---
+        function createCapybaraMesh(isBaby = false) {
+            const root = new THREE.Group();
+            const meshGroup = new THREE.Group();
+            root.add(meshGroup);
+
+            // Anatomy Tweaks for Baby (Cuter proportions)
+            const bodySize = isBaby ? [0.8, 0.8, 1.3] : [0.9, 0.95, 1.7];
+            const headScale = isBaby ? 1.2 : 1.0; // Big head mode
+
+            // Body
+            const body = new THREE.Mesh(new THREE.BoxGeometry(...bodySize), isBaby ? mats.babyFur : mats.fur);
+            body.position.y = isBaby ? 0.7 : 0.9;
+            body.castShadow = true;
+            meshGroup.add(body);
+
+            // Head Group
+            const headGroup = new THREE.Group();
+            const neckHeight = isBaby ? 0.9 : 1.25;
+            const neckForward = isBaby ? 0.6 : 0.8;
+            headGroup.position.set(0, neckHeight, neckForward);
+            if(isBaby) headGroup.scale.setScalar(headScale);
+            meshGroup.add(headGroup);
+
+            // Skull
+            const skull = new THREE.Mesh(new THREE.BoxGeometry(0.75, 0.8, 0.7), isBaby ? mats.babyFur : mats.fur);
+            skull.position.set(0, 0, 0.2);
+            skull.castShadow = true;
+            headGroup.add(skull);
+
+            // Muzzle
+            const muzzle = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.75, 0.6), isBaby ? mats.babyFur : mats.fur);
+            muzzle.position.set(0, -0.025, 0.85);
+            muzzle.castShadow = true;
+            headGroup.add(muzzle);
+
+            // Nose
+            const nose = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.05, 0.15), mats.nose);
+            nose.position.set(0, 0.35, 1.1);
+            headGroup.add(nose);
+
+            // Ears
+            const earGeo = new THREE.CylinderGeometry(0.08, 0.05, 0.15, 8);
+            const earL = new THREE.Mesh(earGeo, isBaby ? mats.babyFur : mats.fur);
+            earL.rotation.set(Math.PI / 2, 0, -0.2);
+            earL.position.set(0.38, 0.35, 0.1);
+            headGroup.add(earL);
+            const earR = earL.clone();
+            earR.rotation.set(Math.PI / 2, 0, 0.2);
+            earR.position.set(-0.38, 0.35, 0.1);
+            headGroup.add(earR);
+
+            // Eyes (Store position references for tears)
+            const eyeGeo = new THREE.CapsuleGeometry(0.04, 0.1, 4, 8);
+            const eyeL = new THREE.Mesh(eyeGeo, mats.eye);
+            eyeL.rotation.set(Math.PI / 2, 0.2, 0);
+            eyeL.position.set(0.37, 0.25, 0.45);
+            headGroup.add(eyeL);
+            
+            const eyeR = eyeL.clone();
+            eyeR.rotation.set(Math.PI / 2, -0.2, 0);
+            eyeR.position.set(-0.37, 0.25, 0.45);
+            headGroup.add(eyeR);
+
+            // Legs
+            const legs = {};
+            const legW = isBaby ? 0.18 : 0.22;
+            const legH = isBaby ? 0.5 : 0.8;
+            function createLeg(x, z, name) {
+                const pivot = new THREE.Group();
+                const hipY = isBaby ? 0.6 : 0.8;
+                const hipZ = isBaby ? z * 0.8 : z;
+                pivot.position.set(x, hipY, hipZ);
+                
+                const legMesh = new THREE.Mesh(new THREE.BoxGeometry(legW, legH, legW), isBaby ? mats.babyFur : mats.fur);
+                legMesh.position.y = -legH/2;
+                legMesh.castShadow = true;
+                pivot.add(legMesh);
+                meshGroup.add(pivot);
+                legs[name] = pivot;
+            }
+            const lx = isBaby ? 0.25 : 0.3;
+            const lz = 0.6;
+            createLeg(lx, lz, 'FL');
+            createLeg(-lx, lz, 'FR');
+            createLeg(lx, -lz, 'BL');
+            createLeg(-lx, -lz, 'BR');
+
+            // Global Scale for baby
+            if(isBaby) root.scale.setScalar(0.6);
+
+            // Eye Coordinates Helper
+            // We return a function to get current world position of eyes
+            const getEyePos = (isLeft) => {
+                const vec = new THREE.Vector3();
+                (isLeft ? eyeL : eyeR).getWorldPosition(vec);
+                return vec;
+            };
+
+            return { root, meshGroup, headGroup, legs, getEyePos, isBaby };
+        }
+
+        // --- Player ---
+        const player = createCapybaraMesh(false);
+        const playerGroup = new THREE.Group();
+        const playerTilt = new THREE.Group();
+        playerGroup.add(playerTilt);
+        playerTilt.add(player.root);
+        scene.add(playerGroup);
+
+        const playerState = {
+            pos: new THREE.Vector3(0, 0, 0),
+            angle: 0,
+            history: [],
+            isSwimming: false
+        };
+
+        // --- Particles ---
+        const particles = [];
+        const tearGeo = new THREE.BoxGeometry(0.08, 0.08, 0.08);
+        const heartGeo = new THREE.BoxGeometry(0.15, 0.15, 0.15);
+        
+        function spawnParticle(pos, type) {
+            const mesh = new THREE.Mesh(type === 'heart' ? heartGeo : tearGeo, type === 'heart' ? mats.heart : mats.tear);
+            mesh.position.copy(pos);
+            const vel = new THREE.Vector3(
+                (Math.random() - 0.5) * 0.05,
+                0.05 + Math.random() * 0.05,
+                (Math.random() - 0.5) * 0.05
+            );
+            scene.add(mesh);
+            particles.push({ mesh, vel, life: 1.0, type });
+        }
+
+        // --- Entities ---
+        const babies = [];
+        const lakes = [];
+        
+        class BabyCapy {
+            constructor() {
+                this.obj = createCapybaraMesh(true);
+                this.mesh = this.obj.root;
+                scene.add(this.mesh);
+                this.reset();
+                // Randomize swim personality
+                this.swimSpeed = 0.5 + Math.random() * 0.8;
+                this.swimTurnRate = (Math.random() - 0.5) * 0.05;
+                this.lakeTarget = null; // Which lake are we living in
+            }
+
+            reset() {
+                this.state = 'IDLE'; 
+                this.followIndex = 0;
+                this.lakeRef = null;
+                const angle = Math.random() * Math.PI * 2;
+                const dist = 35 + Math.random() * 20;
+                this.mesh.position.set(
+                    playerState.pos.x + Math.sin(angle) * dist,
+                    0,
+                    playerState.pos.z + Math.cos(angle) * dist
+                );
+                this.mesh.rotation.y = Math.random() * Math.PI * 2;
+                this.mesh.visible = true;
+                this.obj.meshGroup.position.y = 0;
+            }
+
+            update(dt, time, activeIndex) {
+                const dist = this.mesh.position.distanceTo(playerState.pos);
+
+                if (this.state === 'IDLE') {
+                    // Hop
+                    const hop = Math.abs(Math.sin(time * 12)) * 0.15;
+                    this.obj.meshGroup.position.y = hop;
+                    
+                    // Cry from eyes
+                    if (Math.random() < 0.1) {
+                        spawnParticle(this.obj.getEyePos(true), 'tear');
+                        spawnParticle(this.obj.getEyePos(false), 'tear');
+                    }
+
+                    if (dist < 4.0) {
+                        this.state = 'FOLLOWING';
+                        this.followIndex = (activeIndex + 1) * CONF.babySpacing;
+                        for(let i=0; i<5; i++) spawnParticle(this.mesh.position, 'heart');
+                        return true; 
+                    }
+                    if (dist > CONF.renderDistance + 10) this.reset();
+                }
+
+                else if (this.state === 'FOLLOWING') {
+                    // Snake Logic
+                    // Base spacing + index spacing
+                    const targetIdx = this.followIndex + 40; // Add fixed offset so they aren't on player's butt
+                    const histIndex = playerState.history.length - 1 - targetIdx;
+                    
+                    if (histIndex >= 0) {
+                        const point = playerState.history[histIndex];
+                        this.mesh.position.lerp(point.pos, 0.1);
+                        const targetRot = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, point.angle, 0));
+                        this.mesh.quaternion.slerp(targetRot, 0.1);
+                    }
+
+                    const walkCycle = time * CONF.walkSpeed * 4; // Babies walk faster
+                    this.animateLegs(walkCycle);
+                    this.obj.meshGroup.position.y = Math.abs(Math.sin(walkCycle)) * 0.04;
+                }
+
+                else if (this.state === 'SWIMMING') {
+                    // Sanctuary Logic - wander INSIDE the lake
+                    if(this.lakeRef) {
+                        // Move forward
+                        this.mesh.translateZ(this.swimSpeed * dt * 2);
+                        this.mesh.rotation.y += this.swimTurnRate + Math.sin(time) * 0.01;
+
+                        // Keep in bounds of lake
+                        const distToCenter = this.mesh.position.distanceTo(this.lakeRef.position);
+                        if (distToCenter > 9) {
+                            // Turn back to center
+                            this.mesh.lookAt(this.lakeRef.position);
+                        }
+                    }
+
+                    // Float
+                    this.obj.meshGroup.position.y = -0.3 + Math.sin(time * 3) * 0.05;
+                    
+                    const swimCycle = time * 10;
+                    this.animateLegs(swimCycle);
+
+                    // Don't despawn if in lake, unless lake despawns (handled elsewhere)
+                    if(this.lakeRef && !lakes.includes(this.lakeRef)) {
+                        this.reset();
+                    }
+                }
+                return false;
+            }
+
+            animateLegs(cycle) {
+                this.obj.legs.FL.rotation.x = Math.sin(cycle) * 0.5;
+                this.obj.legs.BR.rotation.x = Math.sin(cycle) * 0.5;
+                this.obj.legs.FR.rotation.x = Math.sin(cycle + Math.PI) * 0.5;
+                this.obj.legs.BL.rotation.x = Math.sin(cycle + Math.PI) * 0.5;
+            }
+        }
+
+        for(let i=0; i<6; i++) babies.push(new BabyCapy());
+
+        // --- Infinite World ---
+        const ground = new THREE.Mesh(new THREE.PlaneGeometry(120, 120), new THREE.MeshStandardMaterial({ color: 0x98dcb8 }));
+        ground.rotation.x = -Math.PI / 2;
+        ground.receiveShadow = true;
+        scene.add(ground);
+
+        const decorObjects = [];
+        const geoms = [new THREE.ConeGeometry(0.3, 0.8, 5), new THREE.DodecahedronGeometry(0.5)];
+        const objMats = [new THREE.MeshStandardMaterial({ color: 0x5da662 }), new THREE.MeshStandardMaterial({ color: 0x888888 })];
+
+        for(let i=0; i<100; i++) {
+            const type = Math.floor(Math.random() * 2);
+            const mesh = new THREE.Mesh(geoms[type], objMats[type]);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            scene.add(mesh);
+            decorObjects.push(mesh);
+            const a = Math.random() * Math.PI * 2;
+            const r = Math.random() * 60;
+            mesh.position.set(Math.sin(a)*r, 0, Math.cos(a)*r);
+            if(type===1) mesh.position.y = 0.25;
+        }
+
+        // --- Controls ---
+        const input = { steer: 0, isDragging: false, lastInteractTime: 0 };
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enablePan = false;
+        controls.minDistance = 5;
+        controls.maxDistance = 25;
+        controls.addEventListener('start', () => { input.isDragging = true; });
+        controls.addEventListener('end', () => { input.isDragging = false; input.lastInteractTime = Date.now(); });
+
+        function handleInput(x) {
+            const half = window.innerWidth / 2;
+            if (x < half) { input.steer = 1; document.body.setAttribute('data-steer', 'left'); }
+            else { input.steer = -1; document.body.setAttribute('data-steer', 'right'); }
+            input.lastInteractTime = Date.now();
+        }
+        function stopInput() {
+            input.steer = 0; document.body.removeAttribute('data-steer'); input.lastInteractTime = Date.now();
+        }
+        window.addEventListener('pointerdown', (e) => handleInput(e.clientX));
+        window.addEventListener('pointerup', stopInput);
+        window.addEventListener('pointercancel', stopInput);
+        window.addEventListener('pointermove', (e) => { if(input.steer !== 0) handleInput(e.clientX); });
+
+        // --- Main Loop ---
+        const clock = new THREE.Clock();
+        
+        function animate() {
+            requestAnimationFrame(animate);
+            const dt = clock.getDelta();
+            const time = clock.getElapsedTime();
+
+            // 1. Player Movement
+            if (input.steer !== 0) playerState.angle += input.steer * CONF.turnSpeed * dt;
+
+            // Check if player is in water
+            let inWater = false;
+            lakes.forEach(lake => {
+                if (playerState.pos.distanceTo(lake.position) < 11) inWater = true;
+            });
+            playerState.isSwimming = inWater;
+
+            // Speed modifier (slower in water)
+            const currentSpeed = inWater ? CONF.walkSpeed * 0.6 : CONF.walkSpeed;
+
+            const dx = Math.sin(playerState.angle) * currentSpeed * dt;
+            const dz = Math.cos(playerState.angle) * currentSpeed * dt;
+            playerState.pos.x += dx;
+            playerState.pos.z += dz;
+
+            playerGroup.position.copy(playerState.pos);
+            playerGroup.rotation.y = playerState.angle;
+            
+            playerTilt.rotation.z = THREE.MathUtils.lerp(playerTilt.rotation.z, input.steer * 0.25, 0.1);
+
+            // History
+            if (Math.abs(dx) > 0 || Math.abs(dz) > 0) {
+                playerState.history.push({ pos: playerState.pos.clone(), angle: playerState.angle });
+                if (playerState.history.length > CONF.historyLength) playerState.history.shift();
+            }
+
+            // Player Animation
+            if (inWater) {
+                // Swim Anim
+                player.meshGroup.position.y = THREE.MathUtils.lerp(player.meshGroup.position.y, -0.5, 0.1);
+                playerTilt.rotation.x = Math.sin(time * 2) * 0.05; // Gentle float pitch
+                
+                const swimCycle = time * 6;
+                player.legs.FL.rotation.x = Math.sin(swimCycle) * 0.8;
+                player.legs.BR.rotation.x = Math.sin(swimCycle) * 0.8;
+                player.legs.FR.rotation.x = Math.sin(swimCycle + Math.PI) * 0.8;
+                player.legs.BL.rotation.x = Math.sin(swimCycle + Math.PI) * 0.8;
+            } else {
+                // Walk Anim
+                player.meshGroup.position.y = THREE.MathUtils.lerp(player.meshGroup.position.y, 0, 0.1);
+                playerTilt.rotation.x = 0;
+
+                const walkCycle = time * CONF.walkSpeed * 3;
+                player.legs.FL.rotation.x = Math.sin(walkCycle) * 0.5;
+                player.legs.BR.rotation.x = Math.sin(walkCycle) * 0.5;
+                player.legs.FR.rotation.x = Math.sin(walkCycle + Math.PI) * 0.5;
+                player.legs.BL.rotation.x = Math.sin(walkCycle + Math.PI) * 0.5;
+                player.meshGroup.position.y = Math.abs(Math.sin(walkCycle)) * 0.05;
+            }
+
+            // 2. Babies & Lake Logic
+            let activeBabies = 0;
+            babies.forEach(baby => { if (baby.state === 'FOLLOWING') activeBabies++; });
+
+            let currentActiveIndex = 0;
+            babies.forEach(baby => {
+                const joined = baby.update(dt, time, currentActiveIndex);
+                if (joined || baby.state === 'FOLLOWING') {
+                    currentActiveIndex++;
+                    
+                    // Release to Lake
+                    lakes.forEach(lake => {
+                        if (baby.state === 'FOLLOWING' && baby.mesh.position.distanceTo(lake.position) < 10) {
+                            baby.state = 'SWIMMING';
+                            baby.lakeRef = lake;
+                            // Visual Pop
+                            for(let i=0; i<5; i++) spawnParticle(baby.mesh.position, 'heart');
+                        }
+                    });
+                }
+            });
+
+            // 3. Particles
+            for (let i = particles.length - 1; i >= 0; i--) {
+                const p = particles[i];
+                p.life -= dt;
+                p.mesh.position.add(p.vel);
+                if(p.type === 'heart') p.mesh.position.y += 0.02; // Hearts float up
+                p.mesh.rotation.x += dt;
+                p.mesh.scale.setScalar(p.life);
+                if (p.life <= 0) { scene.remove(p.mesh); particles.splice(i, 1); }
+            }
+
+            // 4. World
+            ground.position.x = playerState.pos.x;
+            ground.position.z = playerState.pos.z;
+
+            decorObjects.forEach(obj => {
+                if(obj.position.distanceTo(playerState.pos) > CONF.renderDistance) {
+                    const angleOffset = (Math.random() - 0.5) * Math.PI; 
+                    const spawnAngle = playerState.angle + angleOffset;
+                    const spawnDist = CONF.renderDistance * 0.95;
+                    obj.position.x = playerState.pos.x + Math.sin(spawnAngle) * spawnDist;
+                    obj.position.z = playerState.pos.z + Math.cos(spawnAngle) * spawnDist;
+                }
+            });
+
+            if (Math.random() < CONF.lakeRarity && lakes.length < 2) {
+                const lake = new THREE.Mesh(new THREE.CircleGeometry(12, 32), mats.water);
+                lake.rotation.x = -Math.PI / 2;
+                const angle = playerState.angle + (Math.random()-0.5); 
+                const dist = 50;
+                lake.position.set(playerState.pos.x + Math.sin(angle)*dist, 0.05, playerState.pos.z + Math.cos(angle)*dist);
+                scene.add(lake);
+                lakes.push(lake);
+            }
+            for (let i = lakes.length - 1; i >= 0; i--) {
+                if (lakes[i].position.distanceTo(playerState.pos) > CONF.renderDistance + 30) {
+                    scene.remove(lakes[i]);
+                    lakes.splice(i, 1);
+                }
+            }
+
+            // 5. Camera
+            controls.target.lerp(playerState.pos.clone().add(new THREE.Vector3(0, 1, 0)), 0.1);
+            const timeSinceInteract = Date.now() - input.lastInteractTime;
+            if (!input.isDragging && timeSinceInteract > 2000 && input.steer === 0) {
+                const camOffset = new THREE.Vector3(0, 7, -14); // Higher and further back
+                camOffset.applyAxisAngle(new THREE.Vector3(0, 1, 0), playerState.angle);
+                camera.position.lerp(playerState.pos.clone().add(camOffset), 0.05);
+            } else {
+                camera.position.x += dx; camera.position.z += dz;
+            }
+            controls.update();
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
